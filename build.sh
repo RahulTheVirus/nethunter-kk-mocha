@@ -10,7 +10,8 @@ VER=$(cat "$RDIR/VERSION")
 
 # directory containing cross-compile arm toolchain
 TOOLCHAIN=$RDIR/../toolchain
-
+CCACHE=$RDIR/../ccache
+zImage=$RDIR/build/arch/arm/boot/zImage
 CPU_THREADS=$(grep -c "processor" /proc/cpuinfo)
 # amount of cpu threads to use in kernel make process
 THREADS=$((CPU_THREADS + 1))
@@ -33,7 +34,8 @@ ABORT()
 
 export ARCH=arm
 export CROSS_COMPILE=$TOOLCHAIN/bin/arm-linux-gnueabihf-
-
+export USE_CCACHE=1
+export CCACHE_DIR=$CCACHE
 [ -x "${CROSS_COMPILE}gcc" ] ||
 ABORT "Unable to find gcc cross-compiler at location: ${CROSS_COMPILE}gcc"
 
@@ -50,14 +52,22 @@ export LOCALVERSION=-V$VER-$DEVICE
 
 CLEAN_BUILD()
 {
-	echo "Cleaning build..."
-	rm -rf build
+	echo "Cleaning build.."
+	rm -rf ./build
+	rm -rf ./../ccache
 }
 
 SETUP_BUILD()
 {
 	echo "Creating kernel config for $LOCALVERSION..."
 	mkdir -p build
+	if [ -d $CCACHE ] ; then
+   echo "You have already ccache..."
+  else 
+	mkdir -p $CCACHE
+	
+fi
+	
 	make -C "$RDIR" O=build "$DEFCONFIG" \
 		|| ABORT "Failed to set up build"
 }
@@ -94,8 +104,6 @@ SETUP_BUILD &&
 BUILD_KERNEL &&
 INSTALL_MODULES &&
 echo "Finished building $LOCALVERSION!"
-echo "Collect zImage from build/arch/arm/boot"
-echo "Collect modules & firmware from build/lib"
    }
 
 else
@@ -105,8 +113,6 @@ else
 BUILD_KERNEL &&
 INSTALL_MODULES &&
 echo "Finished building $LOCALVERSION!"
-echo "Collect zImage from build/arch/arm/boot"
-echo "Collect modules & firmware from build/lib"
   }
 
 fi
@@ -121,8 +127,34 @@ SETUP_BUILD &&
 BUILD_KERNEL &&
 INSTALL_MODULES &&
 echo "Finished building $LOCALVERSION!"
-echo "Collect zImage from build/arch/arm/boot"
-echo "Collect modules & firmware from build/lib"
  }
  
 fi
+if [ -f $zImage ] ; then
+   echo " "
+   echo " "
+   echo " Please  "
+   echo " "
+   echo " Collect zImage from build/arch/arm/boot"
+   echo " "
+   echo " Collect modules & firmware from build/lib"
+   echo " "
+   echo " You Can connect us on https://t.me/mipad1 "
+   echo " "
+   echo "                          Thanks& Regards! "
+   echo "                            RahulTheVirus! "
+   echo " "
+else
+    echo " "
+    echo "Please Review & Fix the errors"
+    echo " "
+    echo "And try again.."
+    echo " "
+    echo " You Can connect us on https://t.me/mipad1 "
+    echo " "
+    echo "                          Thanks& Regards! "
+    echo "                            RahulTheVirus! "
+    echo " "
+
+fi
+   

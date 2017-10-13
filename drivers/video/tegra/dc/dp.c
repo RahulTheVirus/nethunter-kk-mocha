@@ -46,6 +46,16 @@ static inline void tegra_dpaux_writel(struct tegra_dc_dp_data *dp,
 	writel(val, dp->aux_base + reg * 4);
 }
 
+
+static inline void tegra_dpaux_write_field(struct tegra_dc_dp_data *dp,
+					u32 reg, u32 mask, u32 val)
+{
+	u32 reg_val = tegra_dpaux_readl(dp, reg);
+	reg_val &= ~mask;
+	reg_val |= val;
+	tegra_dpaux_writel(dp, reg, reg_val);
+}
+
 static inline void tegra_dp_int_en(struct tegra_dc_dp_data *dp, u32 intr)
 {
 	u32 val;
@@ -64,7 +74,7 @@ static inline void tegra_dp_int_dis(struct tegra_dc_dp_data *dp, u32 intr)
 	u32 val;
 
 	val = tegra_dpaux_readl(dp, DPAUX_INTR_EN_AUX);
-	val &= intr;
+	val &= ~intr;
 
 	tegra_dpaux_writel(dp, DPAUX_INTR_EN_AUX, val);
 }
@@ -107,41 +117,98 @@ static inline u32 tegra_dc_dpaux_poll_register(struct tegra_dc_dp_data *dp,
 
 static inline int tegra_dpaux_wait_transaction(struct tegra_dc_dp_data *dp)
 {
-	/* According to DP spec, each aux transaction needs to finish
-	   within 40ms. */
-	if (tegra_dc_dpaux_poll_register(dp, DPAUX_DP_AUXCTL,
-			DPAUX_DP_AUXCTL_TRANSACTREQ_MASK,
-			DPAUX_DP_AUXCTL_TRANSACTREQ_DONE,
-			100, DP_AUX_TIMEOUT_MS) != 0) {
-		dev_err(&dp->dc->ndev->dev,
-			"dp: DPAUX transaction timeout\n");
-		return -EFAULT;
+	int err = 0;
+
+	if (unlikely(tegra_platform_is_fpga())) {
+		if (tegra_dc_dpaux_poll_register(dp, DPAUX_DP_AUXCTL,
+				DPAUX_DP_AUXCTL_TRANSACTREQ_MASK,
+				DPAUX_DP_AUXCTL_TRANSACTREQ_DONE,
+				100, DP_AUX_TIMEOUT_MS) != 0)
+			err = -EFAULT;
 	}
-	return 0;
+
+	if (likely(tegra_platform_is_silicon())) {
+		INIT_COMPLETION(dp->aux_tx);
+		tegra_dp_int_en(dp, DPAUX_INTR_EN_AUX_TX_DONE);
+		if (tegra_dpaux_readl(dp, DPAUX_DP_AUXCTL) &
+				DPAUX_DP_AUXCTL_TRANSACTREQ_PENDING) {
+			if (!wait_for_completion_timeout(&dp->aux_tx,
+				msecs_to_jiffies(DP_AUX_TIMEOUT_MS)))
+				err = -EBUSY;
+		}
+		tegra_dp_int_dis(dp, DPAUX_INTR_EN_AUX_TX_DONE);
+	}
+
+	if (err)
+		dev_err(&dp->dc->ndev->dev, "dp: aux tx timeout\n");
+	return err;
 }
 
+static int tegra_dp_aux_tx_config(struct tegra_dc_dp_data *dp,
+				u32 cmd, u32 addr, bool addr_only,
+				u32 data[], u32 size)
+{
+	int i;
+
+	if (size > DP_AUX_MAX_BYTES)
+		goto fail;
+
+	switch (cmd) {
+	case DPAUX_DP_AUXCTL_CMD_I2CWR:
+	case DPAUX_DP_AUXCTL_CMD_I2CRD:
+	case DPAUX_DP_AUXCTL_CMD_I2CREQWSTAT:
+	case DPAUX_DP_AUXCTL_CMD_MOTWR:
+	case DPAUX_DP_AUXCTL_CMD_MOTRD:
+	case DPAUX_DP_AUXCTL_CMD_MOTREQWSTAT:
+	case DPAUX_DP_AUXCTL_CMD_AUXWR:
+	case DPAUX_DP_AUXCTL_CMD_AUXRD:
+		tegra_dpaux_write_field(dp, DPAUX_DP_AUXCTL,
+					DPAUX_DP_AUXCTL_CMD_MASK, cmd);
+		break;
+	default:
+		goto fail;
+	};
+
+	tegra_dpaux_write_field(dp, DPAUX_DP_AUXCTL,
+				DPAUX_DP_AUXCTL_CMDLEN_MASK,
+				size);
+
+	tegra_dpaux_write_field(dp, DPAUX_DP_AUXCTL,
+				DPAUX_DP_AUXCTL_ADDRESS_ONLY_MASK,
+				(addr_only ? DPAUX_DP_AUXCTL_ADDRESS_ONLY_TRUE :
+				DPAUX_DP_AUXCTL_ADDRESS_ONLY_FALSE));
+
+	tegra_dpaux_writel(dp, DPAUX_DP_AUXADDR, addr);
+	for (i = 0; data && i < (DP_AUX_MAX_BYTES / 4); ++i)
+		tegra_dpaux_writel(dp, DPAUX_DP_AUXDATA_WRITE_W(i), data[i]);
+
+	return 0;
+fail:
+	return -EINVAL;
+ }
 
 static int tegra_dc_dpaux_write_chunk(struct tegra_dc_dp_data *dp, u32 cmd,
 	u32 addr, u8 *data, u32 *size, u32 *aux_stat)
 {
-	int	i;
-	u32	reg_val;
-	u32	timeout_retries = DP_AUX_TIMEOUT_MAX_TRIES;
-	u32	defer_retries	= DP_AUX_DEFER_MAX_TRIES;
+	int err = 0;
+	u32 timeout_retries = DP_AUX_TIMEOUT_MAX_TRIES;
+	u32 defer_retries	= DP_AUX_DEFER_MAX_TRIES;
 
-	if (*size >= DP_AUX_MAX_BYTES)
-		return -EINVAL;	/* only write one chunk of data */
-
-	/* Make sure the command is write command */
 	switch (cmd) {
 	case DPAUX_DP_AUXCTL_CMD_I2CWR:
 	case DPAUX_DP_AUXCTL_CMD_MOTWR:
 	case DPAUX_DP_AUXCTL_CMD_AUXWR:
 		break;
 	default:
-		dev_err(&dp->dc->ndev->dev, "dp: aux write cmd 0x%x is invalid\n",
-			cmd);
+		dev_err(&dp->dc->ndev->dev,
+			"dp: invalid aux write cmd: 0x%x\n", cmd);
 		return -EINVAL;
+	};
+
+	err = tegra_dp_aux_tx_config(dp, cmd, addr, false, (u32 *)data, *size);
+	if (err < 0) {
+		dev_err(&dp->dc->ndev->dev, "dp: incorrect aux tx params\n");
+		return err;
 	}
 
 	if (tegra_platform_is_silicon()) {
@@ -152,27 +219,15 @@ static int tegra_dc_dpaux_write_chunk(struct tegra_dc_dp_data *dp, u32 cmd,
 		}
 	}
 
-	tegra_dpaux_writel(dp, DPAUX_DP_AUXADDR, addr);
-	for (i = 0; i < DP_AUX_MAX_BYTES/4; ++i) {
-		tegra_dpaux_writel(dp, DPAUX_DP_AUXDATA_WRITE_W(i),
-			(u32)*data);
-		data += 4;
-	}
-
-	reg_val = tegra_dpaux_readl(dp, DPAUX_DP_AUXCTL);
-	reg_val &= ~DPAUX_DP_AUXCTL_CMD_MASK;
-	reg_val |= cmd;
-	reg_val &= ~DPAUX_DP_AUXCTL_CMDLEN_FIELD;
-	reg_val |= (*size << DPAUX_DP_AUXCTL_CMDLEN_SHIFT);
-
 	while ((timeout_retries > 0) && (defer_retries > 0)) {
 		if ((timeout_retries != DP_AUX_TIMEOUT_MAX_TRIES) ||
 		    (defer_retries != DP_AUX_DEFER_MAX_TRIES))
 			usleep_range(DP_DPCP_RETRY_SLEEP_NS,
 				DP_DPCP_RETRY_SLEEP_NS << 1);
 
-		reg_val |= DPAUX_DP_AUXCTL_TRANSACTREQ_PENDING;
-		tegra_dpaux_writel(dp, DPAUX_DP_AUXCTL, reg_val);
+		tegra_dpaux_write_field(dp, DPAUX_DP_AUXCTL,
+					DPAUX_DP_AUXCTL_TRANSACTREQ_MASK,
+					DPAUX_DP_AUXCTL_TRANSACTREQ_PENDING);
 
 		if (tegra_dpaux_wait_transaction(dp))
 			dev_err(&dp->dc->ndev->dev,
@@ -267,24 +322,27 @@ tegra_dc_dpaux_write(struct tegra_dc_dp_data *dp, u32 cmd, u32 addr,
 static int tegra_dc_dpaux_read_chunk(struct tegra_dc_dp_data *dp, u32 cmd,
 	u32 addr, u8 *data, u32 *size, u32 *aux_stat)
 {
-	u32	reg_val;
-	u32	timeout_retries = DP_AUX_TIMEOUT_MAX_TRIES;
-	u32	defer_retries	= DP_AUX_DEFER_MAX_TRIES;
+	int err = 0;
+	u32 timeout_retries = DP_AUX_TIMEOUT_MAX_TRIES;
+	u32 defer_retries	= DP_AUX_DEFER_MAX_TRIES;
 
-	if (*size >= DP_AUX_MAX_BYTES)
-		return -EINVAL;	/* only read one chunk */
-
-	/* Check to make sure the command is read command */
 	switch (cmd) {
 	case DPAUX_DP_AUXCTL_CMD_I2CRD:
 	case DPAUX_DP_AUXCTL_CMD_I2CREQWSTAT:
+	case DPAUX_DP_AUXCTL_CMD_MOTREQWSTAT:
 	case DPAUX_DP_AUXCTL_CMD_MOTRD:
 	case DPAUX_DP_AUXCTL_CMD_AUXRD:
 		break;
 	default:
 		dev_err(&dp->dc->ndev->dev,
-			"dp: aux read cmd 0x%x is invalid\n", cmd);
+			"dp: invalid aux read cmd: 0x%x\n", cmd);
 		return -EINVAL;
+	};
+
+	err = tegra_dp_aux_tx_config(dp, cmd, addr, false, NULL, *size);
+	if (err < 0) {
+		dev_err(&dp->dc->ndev->dev, "dp: incorrect aux tx params\n");
+		return err;
 	}
 
 	if (tegra_platform_is_silicon()) {
@@ -295,22 +353,15 @@ static int tegra_dc_dpaux_read_chunk(struct tegra_dc_dp_data *dp, u32 cmd,
 		}
 	}
 
-	tegra_dpaux_writel(dp, DPAUX_DP_AUXADDR, addr);
-
-	reg_val = tegra_dpaux_readl(dp, DPAUX_DP_AUXCTL);
-	reg_val &= ~DPAUX_DP_AUXCTL_CMD_MASK;
-	reg_val |= cmd;
-	reg_val &= ~DPAUX_DP_AUXCTL_CMDLEN_FIELD;
-	reg_val |= (*size << DPAUX_DP_AUXCTL_CMDLEN_SHIFT);
-
 	while ((timeout_retries > 0) && (defer_retries > 0)) {
 		if ((timeout_retries != DP_AUX_TIMEOUT_MAX_TRIES) ||
 		    (defer_retries != DP_AUX_DEFER_MAX_TRIES))
 			usleep_range(DP_DPCP_RETRY_SLEEP_NS,
 				DP_DPCP_RETRY_SLEEP_NS << 1);
 
-		reg_val |= DPAUX_DP_AUXCTL_TRANSACTREQ_PENDING;
-		tegra_dpaux_writel(dp, DPAUX_DP_AUXCTL, reg_val);
+		tegra_dpaux_write_field(dp, DPAUX_DP_AUXCTL,
+					DPAUX_DP_AUXCTL_TRANSACTREQ_MASK,
+					DPAUX_DP_AUXCTL_TRANSACTREQ_PENDING);
 
 		if (tegra_dpaux_wait_transaction(dp))
 			dev_err(&dp->dc->ndev->dev,
@@ -546,7 +597,7 @@ static void tegra_dc_dp_dump_link_cfg(struct tegra_dc_dp_data *dp,
 {
 	BUG_ON(!cfg);
 
-	dev_info(&dp->dc->ndev->dev, "DP config: cfg_name               "\
+	dev_info(&dp->dc->ndev->dev, "DP config: cfg_name               "
 		"cfg_value\n");
 	dev_info(&dp->dc->ndev->dev, "           Lane Count             %d\n",
 		cfg->max_lane_count);
@@ -896,6 +947,10 @@ static int tegra_dc_dp_fast_link_training(struct tegra_dc_dp_data *dp,
 	BUG_ON(!cfg || !cfg->is_valid);
 
 	tegra_dc_sor_set_lane_parm(sor, cfg);
+	tegra_dc_sor_set_dp_linkctl(dp->sor, true, trainingPattern_None, cfg);
+	tegra_dc_sor_set_dp_mode(dp->sor, cfg);
+	tegra_dp_set_lane_count(dp, cfg);
+	tegra_dp_set_link_bandwidth(dp, cfg->link_bw);
 
 	tegra_dc_dp_dpcd_write(dp, NV_DPCD_MAIN_LINK_CHANNEL_CODING_SET,
 		NV_DPCD_MAIN_LINK_CHANNEL_CODING_SET_ANSI_8B10B);
@@ -957,6 +1012,42 @@ static int tegra_dc_dp_fast_link_training(struct tegra_dc_dp_data *dp,
 	return 0;
 }
 
+static bool tegra_dc_dp_lower_config(struct tegra_dc_dp_data *dp,
+					struct tegra_dc_dp_link_config *cfg)
+{
+	BUG_ON(!cfg);
+
+	cfg->is_valid = false;
+	if (cfg->link_bw == SOR_LINK_SPEED_G1_62) {
+		if (cfg->max_link_bw > SOR_LINK_SPEED_G1_62)
+			cfg->link_bw = SOR_LINK_SPEED_G2_7;
+		cfg->lane_count /= 2;
+	} else if (cfg->link_bw == SOR_LINK_SPEED_G2_7)
+		cfg->link_bw = SOR_LINK_SPEED_G1_62;
+	else if (cfg->link_bw == SOR_LINK_SPEED_G5_4) {
+		if (cfg->lane_count == 1) {
+			cfg->link_bw = SOR_LINK_SPEED_G2_7;
+			cfg->lane_count = cfg->max_lane_count;
+		} else
+			cfg->lane_count /= 2;
+	} else {
+		dev_err(&dp->dc->ndev->dev,
+			"dp: Error link rate %d\n", cfg->link_bw);
+		return false;
+	}
+
+	if (cfg->lane_count <= 0)
+		goto fail;
+
+	if (!tegra_dc_dp_calc_config(dp, dp->mode, cfg))
+		goto fail;
+
+	cfg->is_valid = true;
+	return true;
+fail:
+	return false;
+}
+
 static int tegra_dp_link_config(struct tegra_dc_dp_data *dp,
 					struct tegra_dc_dp_link_config *cfg)
 {
@@ -965,6 +1056,7 @@ static int tegra_dp_link_config(struct tegra_dc_dp_data *dp,
 	u8	lane_count;
 	u32	retry;
 	int	ret;
+	struct tegra_dc_dp_link_config cur_cfg;
 
 	if (cfg->lane_count == 0) {
 		/* TODO: shutdown the link */
@@ -991,32 +1083,42 @@ static int tegra_dp_link_config(struct tegra_dc_dp_data *dp,
 	if (cfg->alt_scramber_reset_cap)
 		CHECK_RET(tegra_dc_dp_set_assr(dp, true));
 
-	ret = tegra_dp_set_link_bandwidth(dp, cfg->link_bw);
-	if (ret) {
-		dev_err(&dp->dc->ndev->dev, "dp: Failed to set link bandwidth\n");
-		return ret;
-	}
-	ret = tegra_dp_set_lane_count(dp, cfg);
-	if (ret) {
-		dev_err(&dp->dc->ndev->dev, "dp: Failed to set lane count\n");
-		return ret;
-	}
-	tegra_dc_sor_set_dp_linkctl(dp->sor, true, trainingPattern_None, cfg);
-
 	/* Link training rules: always try fast link training for eDP panel
 	   when LT data is provided, or DP panel with valid config values */
 	ret = -1;
 	if ((cfg->edp_cap && dp->pdata->n_lt_settings)
 		|| (cfg->support_fast_lt && cfg->vs_pe_valid)) {
-		ret = tegra_dc_dp_fast_link_training(dp, cfg);
-		if (ret) {
+		cur_cfg.is_valid = false;
+		while (!(ret = tegra_dc_dp_fast_link_training(dp, cfg))) {
+			cur_cfg = *cfg;
+			if (!tegra_dc_dp_lower_config(dp, cfg))
+				break;
+		}
+
+		if (cur_cfg.is_valid) {
+			*cfg = cur_cfg;
+
+			/* redo fast link training if needed */
+			if (unlikely(ret))
+				ret = tegra_dc_dp_fast_link_training(dp, cfg);
+		}
+
+		if (unlikely(ret)) {
 			dev_WARN(&dp->dc->ndev->dev,
 				"dp: fast link training failed\n");
+			/* retstoring the max lane count and bw for Full LT */
+			cfg->lane_count	= cfg->max_lane_count;
+			cfg->link_bw = cfg->max_link_bw;
 			cfg->vs_pe_valid = false;
 		}
 	}
 	/* Fall back to full link training otherwise */
 	if (ret) {
+		tegra_dc_sor_set_dp_linkctl(dp->sor, true,
+		trainingPattern_None, cfg);
+		tegra_dc_sor_set_dp_mode(dp->sor, cfg);
+		tegra_dp_set_lane_count(dp, cfg);
+		tegra_dp_set_link_bandwidth(dp, cfg->link_bw);
 		ret = tegra_dp_lt(dp);
 		if (ret < 0) {
 			dev_err(&dp->dc->ndev->dev, "dp: link training failed\n");
@@ -1052,7 +1154,6 @@ static int tegra_dc_dp_explore_link_cfg(struct tegra_dc_dp_data *dp,
 	}
 
 	ret = tegra_dp_link_config(dp, cfg);
-fail:
 	return ret;
 }
 
@@ -1098,7 +1199,9 @@ static irqreturn_t tegra_dp_irq(int irq, void *ptr)
 
 	if (status & DPAUX_INTR_AUX_PLUG_EVENT_PENDING)
 		complete_all(&dp->hpd_plug);
-
+	if (status & DPAUX_INTR_AUX_TX_DONE_PENDING)
+		complete_all(&dp->aux_tx);
+		
 	if (status & DPAUX_INTR_AUX_IRQ_EVENT_PENDING) {
 		if (tegra_dc_dp_dpcd_read(dp,
 					NV_DPCD_DEVICE_SERVICE_IRQ_VECTOR,
@@ -1211,6 +1314,7 @@ static int tegra_dc_dp_init(struct tegra_dc *dc)
 
 	INIT_WORK(&dp->lt_work, tegra_dc_dp_lt_worker);
 	init_completion(&dp->hpd_plug);
+	init_completion(&dp->aux_tx);
 
 	tegra_dc_set_outdata(dc, dp);
 	tegra_dc_dp_debug_create(dp);
@@ -1262,52 +1366,17 @@ static int tegra_dp_hpd_plug(struct tegra_dc_dp_data *dp)
 		return 0;
 
 	INIT_COMPLETION(dp->hpd_plug);
-	tegra_dp_int_en(dp, DPAUX_INTR_EN_AUX_PLUG_EVENT_EN);
+	tegra_dp_int_en(dp, DPAUX_INTR_EN_AUX_PLUG_EVENT);
 	if (!wait_for_completion_timeout(&dp->hpd_plug,
 		msecs_to_jiffies(TEGRA_DP_HPD_PLUG_TIMEOUT_MS))) {
 		err = -ENODEV;
 		goto fail;
 	}
 fail:
-	tegra_dp_int_dis(dp, DPAUX_INTR_EN_AUX_PLUG_EVENT_DIS);
+	tegra_dp_int_dis(dp, DPAUX_INTR_EN_AUX_PLUG_EVENT);
 	return err;
 
 #undef TEGRA_DP_HPD_PLUG_TIMEOUT_MS
-}
-
-static bool tegra_dc_dp_lower_config(struct tegra_dc_dp_data *dp,
-					struct tegra_dc_dp_link_config *cfg)
-{
-	if (cfg->link_bw == SOR_LINK_SPEED_G1_62) {
-		if (cfg->max_link_bw > SOR_LINK_SPEED_G1_62)
-			cfg->link_bw = SOR_LINK_SPEED_G2_7;
-		cfg->lane_count /= 2;
-	} else if (cfg->link_bw == SOR_LINK_SPEED_G2_7)
-		cfg->link_bw = SOR_LINK_SPEED_G1_62;
-	else if (cfg->link_bw == SOR_LINK_SPEED_G5_4) {
-		if (cfg->lane_count == 1) {
-			cfg->link_bw = SOR_LINK_SPEED_G2_7;
-			cfg->lane_count = cfg->max_lane_count;
-		} else
-			cfg->lane_count /= 2;
-	} else {
-		dev_err(&dp->dc->ndev->dev,
-			"dp: Error link rate %d\n", cfg->link_bw);
-		return false;
-	}
-
-	if (cfg->lane_count <= 0)
-		goto fail;
-
-	if (!tegra_dc_dp_calc_config(dp, dp->mode, cfg))
-		goto fail;
-
-	tegra_dp_set_lane_count(dp, cfg);
-	tegra_dp_set_link_bandwidth(dp, cfg->link_bw);
-
-	return true;
-fail:
-	return false;
 }
 
 static void tegra_dp_set_tx_pu(struct tegra_dc_dp_data *dp, u32 pe[4],
@@ -1792,10 +1861,11 @@ static void tegra_dc_dp_enable(struct tegra_dc *dc)
 
 	tegra_dc_io_start(dc);
 	tegra_dc_dpaux_enable(dp);
-
 	tegra_dp_enable_irq(dp->irq);
-
 	tegra_dp_hpd_config(dp);
+	
+	tegra_dc_unpowergate_locked(dc);
+ 	msleep(80);
 	if (tegra_dp_hpd_plug(dp) < 0) {
 		dev_err(&dc->ndev->dev, "dp: hpd plug failed\n");
 		return;
@@ -1845,6 +1915,7 @@ static void tegra_dc_dp_enable(struct tegra_dc *dc)
 
 	tegra_dc_sor_set_power_state(dp->sor, 1);
 	tegra_dc_sor_attach(dp->sor);
+	tegra_dp_disable_irq(dp->irq);
 	dp->enabled = true;
 
 error_enable:

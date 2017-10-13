@@ -3074,15 +3074,9 @@ int tegra_dsi_start_host_cmd_v_blank_video(struct tegra_dc_dsi_data *dsi,
 				"dsi: not able to set to hs mode\n");
 			goto fail;
 		}
-		tegra_dsi_start_dc_stream(dc, dsi);
-		tegra_dsi_wait_frame_end(dc, dsi, 2);
-		err = tegra_dsi_set_to_lp_mode(dc, dsi, DSI_LP_OP_WRITE);
-		if (err < 0) {
-			dev_err(&dc->ndev->dev,
-				"dsi: not able to set to lp mode\n");
-			goto fail;
-		}
 	}
+	tegra_dsi_start_dc_stream(dc, dsi);
+	tegra_dsi_wait_frame_end(dc, dsi, 2);
  fail:
 	tegra_dc_dsi_release_host(dc);
 	tegra_dc_io_end(dc);
@@ -4942,7 +4936,7 @@ static int tegra_dc_dsi_init(struct tegra_dc *dc)
 	dsi->avdd_dsi_csi =  regulator_get(&dc->ndev->dev, "avdd_dsi_csi");
 	if (IS_ERR_OR_NULL(dsi->avdd_dsi_csi)) {
 		dev_err(&dc->ndev->dev, "dsi: avdd_dsi_csi reg get failed\n");
-		err = PTR_ERR(dsi->avdd_dsi_csi);
+		err = -ENODEV;
 		goto err_reg;
 	}
 

@@ -8721,6 +8721,7 @@ void __init tegra12x_clk_init_la(void)
  */
 #define CPU_FREQ_STEP 102000 /* 102MHz cpu_g table step */
 #define CPU_FREQ_TABLE_MAX_SIZE (2 * MAX_DVFS_FREQS + 1)
+#define CPU_SUSPEND_FREQ  204000
 
 static struct cpufreq_frequency_table freq_table[CPU_FREQ_TABLE_MAX_SIZE];
 static struct tegra_cpufreq_table_data freq_table_data;
@@ -8804,9 +8805,6 @@ struct tegra_cpufreq_table_data *tegra_cpufreq_table_get(void)
 	/* Set G CPU min rate at least one table step below LP maximum */
 	cpu_clk_g->min_rate = min(freq_table[i-2].frequency, g_vmin_freq)*1000;
 
-	/* Suspend index at max LP CPU */
-	freq_table_data.suspend_index = i - 1;
-
 	/* Fill in "hole" (if any) between LP CPU maximum rate and G CPU dvfs
 	   ladder rate at minimum voltage */
 	if (freq < g_vmin_freq) {
@@ -8828,6 +8826,15 @@ struct tegra_cpufreq_table_data *tegra_cpufreq_table_get(void)
 			break;
 	}
 
+	/* Suspend index at max LP CPU */
+	freq_table_data.suspend_index = 0;
+
+	for (j = 1; j < i; j++) {
+		if ((freq_table[j].frequency > CPU_SUSPEND_FREQ) &&
+			(freq_table[j-1].frequency <= CPU_SUSPEND_FREQ))
+			freq_table_data.suspend_index = j - 1;
+	}
+
 	/* Throttle high index one step below maximum */
 	BUG_ON(i >= CPU_FREQ_TABLE_MAX_SIZE);
 	freq_table_data.throttle_highest_index = i - 2;
@@ -8837,20 +8844,38 @@ struct tegra_cpufreq_table_data *tegra_cpufreq_table_get(void)
 
 unsigned long tegra_emc_to_cpu_ratio(unsigned long cpu_rate)
 {
-	/* Vote on memory bus frequency based on cpu frequency;
-	   cpu rate is in kHz, emc rate is in Hz */
-		 if (cpu_rate >= 1300000)
-                 return 924000000;    /* cpu >= 1.3GHz, emc max */
-         else if (cpu_rate >= 975000)
-                 return 400000000;       /* cpu >= 975 MHz, emc 400 MHz */
-         else if (cpu_rate >= 725000)
-                 return  200000000;      /* cpu >= 725 MHz, emc 200 MHz */
-         else if (cpu_rate >= 500000)
-                 return  100000000;      /* cpu >= 500 MHz, emc 100 MHz */
-         else if (cpu_rate >= 275000)
-                 return  50000000;       /* cpu >= 275 MHz, emc 50 MHz */
-         else
-                 return 0;               /* emc min */
+        switch (cur_profile) {
+                case LOW_POWER_PROFILE: {
+                        if (cpu_rate >= 1044000)
+                                return 396000000;
+                        else if (cpu_rate >= 204000)
+                                return 204000000;
+                        break;
+                }
+                case MIDDLE_POWER_PROFILE: {
+                        if (cpu_rate >= 1530000)
+                                return 600000000;
+                        else if (cpu_rate >= 1044000)
+                                return 396000000;
+                        else if (cpu_rate >= 204000)
+                                return 204000000;
+                        break;
+                }
+                case HIGH_POWER_PROFILE:
+                default: {
+	                if (cpu_rate >= 1300000)
+                                return 924000000;    /* cpu >= 1.3GHz, emc max */
+                        else if (cpu_rate >= 975000)
+                                return 400000000;       /* cpu >= 975 MHz, emc 400 MHz */
+                        else if (cpu_rate >= 725000)
+                                return  200000000;      /* cpu >= 725 MHz, emc 200 MHz */
+                        else if (cpu_rate >= 500000)
+                                return  100000000;      /* cpu >= 500 MHz, emc 100 MHz */
+                        else if (cpu_rate >= 275000)
+                                return  50000000;       /* cpu >= 275 MHz, emc 50 MHz */
+                }
+        }
+        return 0;               /* emc min */
 }
 
 int tegra_update_mselect_rate(unsigned long cpu_rate)

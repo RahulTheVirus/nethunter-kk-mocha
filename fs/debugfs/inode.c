@@ -49,8 +49,7 @@ static struct inode *debugfs_get_inode(struct super_block *sb, umode_t mode, dev
 			init_special_inode(inode, mode, dev);
 			break;
 		case S_IFREG:
-			inode->i_fop =  &debugfs_file_operations;
-			inode->i_pipe = (void*)fops;
+			inode->i_fop = fops ? fops : &debugfs_file_operations;
 			inode->i_private = data;
 			break;
 		case S_IFLNK:
@@ -546,7 +545,7 @@ void debugfs_remove_recursive(struct dentry *dentry)
 	parent = dentry;
  down:
 	mutex_lock(&parent->d_inode->i_mutex);
-	list_for_each_entry_safe(child, next, &parent->d_subdirs, d_u.d_child) {
+	list_for_each_entry_safe(child, next, &parent->d_subdirs, d_child) {
 		if (!debugfs_positive(child))
 			continue;
 
@@ -567,8 +566,8 @@ void debugfs_remove_recursive(struct dentry *dentry)
 	mutex_lock(&parent->d_inode->i_mutex);
 
 	if (child != dentry) {
-		next = list_entry(child->d_u.d_child.next, struct dentry,
-					d_u.d_child);
+		next = list_entry(child->d_child.next, struct dentry,
+					d_child);
 		goto up;
 	}
 

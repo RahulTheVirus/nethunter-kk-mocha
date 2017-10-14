@@ -3,7 +3,11 @@
 ===================================================
 * To compile open terminal in source folder and type
 
-* ./build.sh
-                 
+* ./env.sh (if getting errors missing binaries)
+
+* ./build.sh ( auto building zImage & modules )
+
+* ./cleanup.sh (if need make source code clean)
+                 
                                    
 ======================================

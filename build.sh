@@ -1,7 +1,7 @@
 #!/bin/bash
 # simple bash script for executing build
 
-# root directory of NetHunter shieldtablet git repo (default is this script's location)
+# root directory of NetHunter Mipad1[mocha] git repo (default is this script's location)
 RDIR=$(pwd)
 
 [ "$VER" ] ||
@@ -36,6 +36,7 @@ export ARCH=arm
 export CROSS_COMPILE=$TOOLCHAIN/bin/arm-linux-gnueabihf-
 export USE_CCACHE=1
 export CCACHE_DIR=$CCACHE
+
 [ -x "${CROSS_COMPILE}gcc" ] ||
 ABORT "Unable to find gcc cross-compiler at location: ${CROSS_COMPILE}gcc"
 
@@ -53,8 +54,9 @@ export LOCALVERSION=-V$VER-$DEVICE
 CLEAN_BUILD()
 {
 	echo "Cleaning build.."
-	rm -rf ./build
-	rm -rf ./../ccache
+	$RDIR/cleanup.sh
+	echo " Done ! "
+
 }
 
 SETUP_BUILD()
@@ -93,43 +95,27 @@ INSTALL_MODULES() {
 	rm build/lib/modules/*/build build/lib/modules/*/source
 }
 
-cd "$RDIR" || ABORT "Failed to enter $RDIR!"
-if [ -d $RDIR/build ] ; then
-  {
-read -p "Do you want to make a clean build...[Y / N] ?" ans
-if [ "$ans" == "Y|y" ] ; then
-   {
-CLEAN_BUILD &&
-SETUP_BUILD &&
-BUILD_KERNEL &&
-INSTALL_MODULES &&
+echo -e -n "Do you want to clean build directory (y/n)? "
+old_stty_cfg=$(stty -g)
+stty raw -echo
+answer=$( while ! head -c 1 | grep -i '[ny]' ;do true ;done )
+stty $old_stty_cfg
+
+if echo "$answer" | grep -iq "^y" ;then
+    CLEAN_BUILD &&
+    SETUP_BUILD &&
+    BUILD_KERNEL &&
+    INSTALL_MODULES &&
 echo "Finished building $LOCALVERSION!"
-   }
 
-else
+ else
+    rm -r $zImage
+    BUILD_KERNEL &&
+    INSTALL_MODULES &&
+echo "Finished building $LOCALVERSION!"    
 
- {
-     
-BUILD_KERNEL &&
-INSTALL_MODULES &&
-echo "Finished building $LOCALVERSION!"
-  }
+ fi
 
-fi
-
- }
-
-else
-
- {
-CLEAN_BUILD &&
-SETUP_BUILD &&
-BUILD_KERNEL &&
-INSTALL_MODULES &&
-echo "Finished building $LOCALVERSION!"
- }
- 
-fi
 if [ -f $zImage ] ; then
    echo " "
    echo " "
@@ -156,5 +142,5 @@ else
     echo "                            RahulTheVirus! "
     echo " "
 
-fi
+ fi
    

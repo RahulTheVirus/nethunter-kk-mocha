@@ -95,26 +95,11 @@ INSTALL_MODULES() {
 	rm build/lib/modules/*/build build/lib/modules/*/source
 }
 
-echo -e -n "Do you want to clean build directory (y/n)? "
-old_stty_cfg=$(stty -g)
-stty raw -echo
-answer=$( while ! head -c 1 | grep -i '[ny]' ;do true ;done )
-stty $old_stty_cfg
-
-if echo "$answer" | grep -iq "^y" ;then
     CLEAN_BUILD &&
     SETUP_BUILD &&
     BUILD_KERNEL &&
     INSTALL_MODULES &&
 echo "Finished building $LOCALVERSION!"
-
- else
-    rm -r $zImage
-    BUILD_KERNEL &&
-    INSTALL_MODULES &&
-echo "Finished building $LOCALVERSION!"    
-
- fi
 
 if [ -f $zImage ] ; then
    echo " "
